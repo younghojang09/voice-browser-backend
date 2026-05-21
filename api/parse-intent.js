@@ -8,7 +8,56 @@ const SYSTEM_PROMPT =
   '사용자의 발화를 듣고 가장 적절한 도구를 선택해서 호출하세요. ' +
   "'틀어줘'/'들려줘'/'재생해줘' 같은 표현은 play_youtube를 사용하되, " +
   "'유튜브 열어줘' 같이 검색어가 없으면 open_url을 사용하세요. " +
-  '명확하지 않으면 unknown_command를 사용하세요.';
+  '명확하지 않으면 unknown_command를 사용하세요. ' +
+  '이전 대화 맥락을 참고하세요. ' +
+  "'거기서', '방금 그거', '또', '다시' 같은 참조 표현은 이전 대화에서 언급된 대상을 의미합니다. " +
+  "예를 들어 '유튜브 열어줘' 다음에 '거기서 BTS 검색해줘'라고 하면, " +
+  "'거기'는 유튜브를 의미하므로 play_youtube({query: 'BTS'})를 사용하세요.";
+
+const MAX_HISTORY_TURNS = 10;
+
+/**
+ * assistant 메시지의 tool_use 블록을 Claude API 충돌 없이 텍스트로 변환
+ * tool_use가 있는 assistant content 배열 → "[실행: tool(input)]" 문자열
+ *
+ * @param {Array} history - 클라이언트에서 받은 대화 히스토리
+ * @returns {Array} Claude API에 안전하게 전달 가능한 messages 배열
+ */
+function sanitizeHistory(history) {
+  if (!Array.isArray(history)) return [];
+
+  // 최근 MAX_HISTORY_TURNS 턴만 사용
+  const trimmed = history.slice(-MAX_HISTORY_TURNS);
+
+  return trimmed.map((msg) => {
+    // user 메시지는 그대로 사용
+    if (msg.role === 'user') {
+      return { role: 'user', content: String(msg.content ?? '') };
+    }
+
+    // assistant 메시지: content가 배열이면 tool_use 블록을 텍스트로 변환
+    if (msg.role === 'assistant') {
+      if (Array.isArray(msg.content)) {
+        const parts = msg.content.map((block) => {
+          if (block.type === 'tool_use') {
+            // input 객체를 "key=value" 형태로 직렬화
+            const inputStr = Object.entries(block.input ?? {})
+              .map(([k, v]) => `${k}="${v}"`)
+              .join(', ');
+            return `[실행: ${block.name}(${inputStr})]`;
+          }
+          // text 블록은 그대로 반환
+          return block.text ?? '';
+        });
+        return { role: 'assistant', content: parts.filter(Boolean).join(' ') };
+      }
+      // content가 이미 문자열이면 그대로 사용
+      return { role: 'assistant', content: String(msg.content ?? '') };
+    }
+
+    return null;
+  }).filter(Boolean);
+}
 
 module.exports = async (req, res) => {
   if (handleCors(req, res)) return;
@@ -34,10 +83,23 @@ module.exports = async (req, res) => {
     return res.status(500).json({ error: 'ANTHROPIC_API_KEY가 설정되지 않았습니다' });
   }
 
-  const { text } = req.body;
+  const { text, history } = req.body;
   if (!text) {
     return res.status(400).json({ error: 'text 필드가 필요합니다' });
   }
+
+  // history 유효성 검사 — 잘못된 형식이면 빈 배열로 대체
+  const rawHistory = Array.isArray(history) ? history : [];
+  console.log('[parse-intent] history 수신 | 턴 수:', rawHistory.length);
+
+  const sanitizedHistory = sanitizeHistory(rawHistory);
+  const messages = [
+    ...sanitizedHistory,
+    { role: 'user', content: text },
+  ];
+
+  console.log('[parse-intent] Claude에 전달할 messages 구조:',
+    messages.map((m) => `${m.role}: ${String(m.content).slice(0, 60)}`));
 
   try {
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -48,7 +110,7 @@ module.exports = async (req, res) => {
       system: SYSTEM_PROMPT,
       tools,
       tool_choice: { type: 'auto' },
-      messages: [{ role: 'user', content: text }],
+      messages,
     });
 
     // tool_use 블록 추출
