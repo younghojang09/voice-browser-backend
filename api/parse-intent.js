@@ -1,4 +1,5 @@
 const { handleCors } = require('../lib/cors');
+const { verifyToken, checkUsageLimit, logUsage } = require('../lib/auth');
 const Anthropic = require('@anthropic-ai/sdk');
 const { tools } = require('../lib/tools');
 
@@ -14,6 +15,19 @@ module.exports = async (req, res) => {
 
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'POST 요청만 허용됩니다' });
+  }
+
+  // 토큰 검증
+  const authResult = await verifyToken(req);
+  if (authResult.error) {
+    return res.status(authResult.status).json({ error: authResult.error });
+  }
+
+  // 사용량 한도 확인
+  const { user } = authResult;
+  const { allowed, used, limit } = await checkUsageLimit(user.id);
+  if (!allowed) {
+    return res.status(429).json({ error: `오늘 사용량을 초과했습니다 (${used}/${limit})` });
   }
 
   if (!process.env.ANTHROPIC_API_KEY) {
@@ -39,6 +53,9 @@ module.exports = async (req, res) => {
 
     // tool_use 블록 추출
     const toolUseBlock = response.content.find((block) => block.type === 'tool_use');
+
+    // 사용 기록 저장 (실패해도 응답에 영향 없음)
+    await logUsage(user.id, 'parse-intent');
 
     if (!toolUseBlock) {
       return res.status(200).json({ tool: 'unknown_command', input: { reason: '도구를 선택하지 않았습니다' } });

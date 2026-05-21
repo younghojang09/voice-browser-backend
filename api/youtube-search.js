@@ -1,4 +1,5 @@
 const { handleCors } = require('../lib/cors');
+const { verifyToken, checkUsageLimit, logUsage } = require('../lib/auth');
 const https = require('https');
 
 // YouTube Data API v3 search를 Promise로 래핑
@@ -34,6 +35,19 @@ module.exports = async (req, res) => {
     return res.status(405).json({ error: 'POST 요청만 허용됩니다' });
   }
 
+  // 토큰 검증
+  const authResult = await verifyToken(req);
+  if (authResult.error) {
+    return res.status(authResult.status).json({ error: authResult.error });
+  }
+
+  // 사용량 한도 확인
+  const { user } = authResult;
+  const { allowed, used, limit } = await checkUsageLimit(user.id);
+  if (!allowed) {
+    return res.status(429).json({ error: `오늘 사용량을 초과했습니다 (${used}/${limit})` });
+  }
+
   if (!process.env.YOUTUBE_API_KEY) {
     return res.status(500).json({ error: 'YOUTUBE_API_KEY가 설정되지 않았습니다' });
   }
@@ -53,6 +67,9 @@ module.exports = async (req, res) => {
     const item = data.items[0];
     const videoId = item.id.videoId;
     const title = item.snippet.title;
+
+    // 사용 기록 저장 (실패해도 응답에 영향 없음)
+    await logUsage(user.id, 'youtube-search');
 
     return res.status(200).json({
       videoId,

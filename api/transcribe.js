@@ -1,4 +1,5 @@
 const { handleCors } = require('../lib/cors');
+const { verifyToken, checkUsageLimit, logUsage } = require('../lib/auth');
 const OpenAI = require('openai');
 const { toFile } = require('openai');
 
@@ -7,6 +8,19 @@ module.exports = async (req, res) => {
 
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'POST 요청만 허용됩니다' });
+  }
+
+  // 토큰 검증
+  const authResult = await verifyToken(req);
+  if (authResult.error) {
+    return res.status(authResult.status).json({ error: authResult.error });
+  }
+
+  // 사용량 한도 확인
+  const { user } = authResult;
+  const { allowed, used, limit } = await checkUsageLimit(user.id);
+  if (!allowed) {
+    return res.status(429).json({ error: `오늘 사용량을 초과했습니다 (${used}/${limit})` });
   }
 
   if (!process.env.OPENAI_API_KEY) {
@@ -32,6 +46,9 @@ module.exports = async (req, res) => {
       language: 'ko',
       response_format: 'json',
     });
+
+    // 사용 기록 저장 (실패해도 응답에 영향 없음)
+    await logUsage(user.id, 'transcribe');
 
     return res.status(200).json({ text: transcription.text });
   } catch (err) {
