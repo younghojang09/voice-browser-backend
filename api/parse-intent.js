@@ -9,6 +9,10 @@ const SYSTEM_PROMPT =
   "'틀어줘'/'들려줘'/'재생해줘' 같은 표현은 play_youtube를 사용하되, " +
   "'유튜브 열어줘' 같이 검색어가 없으면 open_url을 사용하세요. " +
   '명확하지 않으면 unknown_command를 사용하세요. ' +
+  "사용자가 '그리고', '~하고', '~한 다음', '동시에' 같은 표현으로 여러 동작을 한 번에 요청하면, " +
+  '여러 도구를 순서대로 모두 호출하세요. ' +
+  "예: '유튜브 열고 구글에서 BTS 검색해줘' → open_url과 search_web 두 도구를 모두 호출. " +
+  '도구 호출 순서는 사용자가 말한 순서를 따르세요. ' +
   '이전 대화 맥락을 참고하세요. ' +
   "'거기서', '방금 그거', '또', '다시' 같은 참조 표현은 이전 대화에서 언급된 대상을 의미합니다. " +
   "예를 들어 '유튜브 열어줘' 다음에 '거기서 BTS 검색해줘'라고 하면, " +
@@ -18,7 +22,7 @@ const MAX_HISTORY_TURNS = 10;
 
 /**
  * assistant 메시지의 tool_use 블록을 Claude API 충돌 없이 텍스트로 변환
- * tool_use가 있는 assistant content 배열 → "[실행: tool(input)]" 문자열
+ * tool_use가 여러 개인 경우도 모두 처리
  *
  * @param {Array} history - 클라이언트에서 받은 대화 히스토리
  * @returns {Array} Claude API에 안전하게 전달 가능한 messages 배열
@@ -40,18 +44,16 @@ function sanitizeHistory(history) {
       if (Array.isArray(msg.content)) {
         const parts = msg.content.map((block) => {
           if (block.type === 'tool_use') {
-            // input 객체를 "key=value" 형태로 직렬화
+            // input 객체를 "key=value" 형태로 직렬화 (tool_use가 여러 개여도 각각 처리)
             const inputStr = Object.entries(block.input ?? {})
               .map(([k, v]) => `${k}="${v}"`)
               .join(', ');
             return `[실행: ${block.name}(${inputStr})]`;
           }
-          // text 블록은 그대로 반환
           return block.text ?? '';
         });
         return { role: 'assistant', content: parts.filter(Boolean).join(' ') };
       }
-      // content가 이미 문자열이면 그대로 사용
       return { role: 'assistant', content: String(msg.content ?? '') };
     }
 
@@ -90,7 +92,7 @@ module.exports = async (req, res) => {
 
   // history 유효성 검사 — 잘못된 형식이면 빈 배열로 대체
   const rawHistory = Array.isArray(history) ? history : [];
-  console.log('[parse-intent] history 수신 | 턴 수:', rawHistory.length);
+  console.log('[parse-intent] 수신 | 텍스트:', text, '| history 턴 수:', rawHistory.length);
 
   const sanitizedHistory = sanitizeHistory(rawHistory);
   const messages = [
@@ -113,17 +115,27 @@ module.exports = async (req, res) => {
       messages,
     });
 
-    // tool_use 블록 추출
-    const toolUseBlock = response.content.find((block) => block.type === 'tool_use');
+    // content에서 모든 tool_use 블록 추출 (멀티 명령 지원)
+    const toolUses = response.content
+      .filter((block) => block.type === 'tool_use')
+      .map((block) => ({ name: block.name, input: block.input }));
+
+    console.log('[parse-intent] 추출된 도구 수:', toolUses.length);
+    toolUses.forEach((t, i) => {
+      console.log(`[parse-intent] 도구 ${i + 1}: ${t.name} | input:`, JSON.stringify(t.input));
+    });
 
     // 사용 기록 저장 (실패해도 응답에 영향 없음)
     await logUsage(user.id, 'parse-intent');
 
-    if (!toolUseBlock) {
-      return res.status(200).json({ tool: 'unknown_command', input: { reason: '도구를 선택하지 않았습니다' } });
+    // 도구가 없으면 unknown_command를 배열에 담아 반환
+    if (toolUses.length === 0) {
+      return res.status(200).json({
+        tools: [{ name: 'unknown_command', input: { reason: '명령을 이해하지 못했습니다' } }],
+      });
     }
 
-    return res.status(200).json({ tool: toolUseBlock.name, input: toolUseBlock.input });
+    return res.status(200).json({ tools: toolUses });
   } catch (err) {
     console.error('[parse-intent] 오류:', err);
     return res.status(500).json({ error: '의도 파악 중 오류가 발생했습니다', detail: err.message });
