@@ -11,8 +11,10 @@ const SYSTEM_PROMPT =
   '명확하지 않으면 unknown_command를 사용하세요. ' +
   "사용자가 '그리고', '~하고', '~한 다음', '동시에' 같은 표현으로 여러 동작을 한 번에 요청하면, " +
   '여러 도구를 순서대로 모두 호출하세요. ' +
-  "예: '유튜브 열고 구글에서 BTS 검색해줘' → open_url과 search_web 두 도구를 모두 호출. " +
-  '도구 호출 순서는 사용자가 말한 순서를 따르세요. ' +
+  '사용자가 여러 동작을 요청하면 개수에 상관없이 필요한 모든 도구를 순서대로 호출하세요. ' +
+  '2개든 5개든 사용자가 말한 모든 동작을 빠짐없이 도구로 변환하세요. ' +
+  "예: '유튜브 열고 구글에서 파이썬 검색하고 네이버 열고 확대해줘' → open_url, search_web, open_url, zoom_in 네 개를 순서대로 호출. " +
+  '도구 호출 순서는 사용자가 말한 순서를 정확히 지키세요. ' +
   '이전 대화 맥락을 참고하세요. ' +
   "'거기서', '방금 그거', '또', '다시' 같은 참조 표현은 이전 대화에서 언급된 대상을 의미합니다. " +
   "예를 들어 '유튜브 열어줘' 다음에 '거기서 BTS 검색해줘'라고 하면, " +
@@ -110,7 +112,7 @@ module.exports = async (req, res) => {
 
     const response = await client.messages.create({
       model: 'claude-sonnet-4-5',
-      max_tokens: 1024,
+      max_tokens: 2048,
       system: SYSTEM_PROMPT,
       tools,
       tool_choice: { type: 'auto' },
